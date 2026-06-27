@@ -46,5 +46,5 @@ curl --resolve raw.githubusercontent.com:443:185.199.108.133 -O [https://raw.git
 ### Быстрый запуск:
 
 ```bash
-curl -o /tmp/insta_healer.sh https://raw.githubusercontent.com/MarkinAlexander/custom-scripts/main/insta_healer.sh && sudo bash /tmp/insta_healer.sh
+curl -o /tmp/insta_healer.sh https://raw.githubusercontent.com/MarkinAlexander/custom-scripts/main/insta_healer.sh && bash /tmp/insta_healer.sh
 ```
