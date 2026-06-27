@@ -4,20 +4,20 @@
 
 ## Требования
 
-Все скрипты написаны для **Bash** и требуют его наличия в системе.
-
+Все скрипты написаны для **Bash** и требуют его наличия в системе. Для скачивания используется **Curl**
+установить их можно следующим способом:
 ### OpenWrt до версии 25.x и Keenetic (Entware)
 
 ```bash
 opkg update
-opkg install bash
+opkg install bash curl
 ```
 
 ### OpenWrt 25.x и новее
 
 ```bash
 apk update
-apk add bash
+apk add bash curl
 ```
 
 ---
