@@ -30,7 +30,7 @@ apk add bash curl
 
 ### Быстрый запуск (в обход блокировки DNS):
 ```bash
-curl --resolve raw.githubusercontent.com:443:185.199.108.133 -O [https://raw.githubusercontent.com/MarkinAlexander/custom-scripts/main/gh_fix.sh](https://raw.githubusercontent.com/MarkinAlexander/custom-scripts/main/gh_fix.sh) && bash gh_fix.sh
+curl --resolve raw.githubusercontent.com:443:185.199.108.133 -o /tmp/gh_fix.sh https://raw.githubusercontent.com/MarkinAlexander/custom-scripts/main/gh_fix.sh && bash /tmp/gh_fix.sh
 ```
 
 ---

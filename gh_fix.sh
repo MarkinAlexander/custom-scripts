@@ -115,25 +115,24 @@ if command -v ndmc >/dev/null 2>&1; then
 
   ndmc -c "system configuration save" >/dev/null 2>&1
   echo -e "${green}Готово! Записи добавлены в DNS Keenetic и конфигурация сохранена.${plain}"
-
-else
-  echo -e "${yellow}Обнаружена стандартная система (Linux/OpenWrt). Пишу в /etc/hosts...${plain}"
-
-  hosts_file="/etc/hosts"
-  temp_file="/tmp/hosts_temp_$$"
-
-  pattern=$(IFS="|"; echo "${GITHUB_DOMAINS[*]//./\\.}")
-
-  grep -vE "^[[:space:]]*([0-9]{1,3}\.){3}[0-9]{1,3}[[:space:]]+($pattern)" "$hosts_file" > "$temp_file" 2>/dev/null || true
-
-  for domain in "${GITHUB_DOMAINS[@]}"; do
-    echo "$selected_ip $domain" >> "$temp_file"
-  done
-
-  cat "$temp_file" > "$hosts_file"
-  rm -f "$temp_file"
-
-  echo -e "${green}Готово! Рабочие домены GitHub прописаны в /etc/hosts.${plain}"
 fi
+
+echo -e "${yellow}Добавляю записи в /etc/hosts...${plain}"
+
+hosts_file="/etc/hosts"
+temp_file="/tmp/hosts_temp_$$"
+
+pattern=$(IFS="|"; echo "${GITHUB_DOMAINS[*]//./\\.}")
+
+grep -vE "^[[:space:]]*([0-9]{1,3}\.){3}[0-9]{1,3}[[:space:]]+($pattern)" "$hosts_file" > "$temp_file" 2>/dev/null || true
+
+for domain in "${GITHUB_DOMAINS[@]}"; do
+  echo "$selected_ip $domain" >> "$temp_file"
+done
+
+cat "$temp_file" > "$hosts_file"
+rm -f "$temp_file"
+
+echo -e "${green}Готово! Рабочие домены GitHub прописаны в /etc/hosts.${plain}"
 
 exit 0
