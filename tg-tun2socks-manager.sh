@@ -296,20 +296,23 @@ $(echo -e "$SUBNETS_FORMATTED")
 
 case "\$1" in
     up)
+        ip link set dev \$TUN_DEV down 2>/dev/null || true
+        ip tuntap del dev \$TUN_DEV mode tun 2>/dev/null || true
+
         ip tuntap add dev \$TUN_DEV mode tun
         ip link set dev \$TUN_DEV mtu \$TUN_MTU up
         ip addr add \$TUN_IP dev \$TUN_DEV
         sleep 1
 
         for subnet in "\${SUBNETS[@]}"; do
-            ip route add "\$subnet" dev \$TUN_DEV
+            ip route add "\$subnet" dev \$TUN_DEV 2>/dev/null || true
         done
 
-        exec /usr/local/bin/tun2socks -device \$TUN_DEV -proxy socks5://\$PROXY_ADDR -mtu \$TUN_MTU
+        exec /usr/local/bin/tun2socks --device "\$TUN_DEV" --proxy "socks5://\$PROXY_ADDR" --mtu "\$TUN_MTU"
         ;;
     down)
-        ip link set dev \$TUN_DEV down
-        ip tuntap del dev \$TUN_DEV mode tun
+        ip link set dev \$TUN_DEV down 2>/dev/null || true
+        ip tuntap del dev \$TUN_DEV mode tun 2>/dev/null || true
         ;;
     *)
         echo "Использование: \$0 {up|down}"
