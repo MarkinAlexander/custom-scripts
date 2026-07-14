@@ -181,7 +181,84 @@ done
 
 echo ""
 echo "========================================="
-echo " ШАГ 3: Установка утилиты tun2socks"
+echo " ШАГ 3: Настройка SOCKS5-прокси"
+echo "========================================="
+
+validate_port() {
+    local port="$1"
+    if ! [[ "$port" =~ ^[0-9]+$ ]] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+        return 1
+    fi
+    return 0
+}
+
+echo "Куда направлять трафик? Выберите тип прокси:"
+echo "  [1] - Локальный прокси (127.0.0.1) — указать только порт"
+echo "  [2] - Внешний SOCKS5 с логином и паролем"
+echo "  [3] - Внешний SOCKS5 без авторизации"
+echo "-----------------------------------------"
+read -p "Ваш выбор [1]: " PROXY_CHOICE
+PROXY_CHOICE=${PROXY_CHOICE:-1}
+
+case "$PROXY_CHOICE" in
+    1)
+        read -p "Введите порт локального прокси [10808]: " PROXY_PORT
+        PROXY_PORT=${PROXY_PORT:-10808}
+        if ! validate_port "$PROXY_PORT"; then
+            echo "❌ Ошибка: Некорректный порт (должен быть от 1 до 65535)!"
+            exit 1
+        fi
+        PROXY_ADDR="127.0.0.1:${PROXY_PORT}"
+        echo "✅ Выбран локальный прокси: socks5://${PROXY_ADDR}"
+        ;;
+    2)
+        read -p "Введите адрес (IP или домен) прокси-сервера: " PROXY_HOST
+        if [ -z "$PROXY_HOST" ]; then
+            echo "❌ Ошибка: Адрес прокси не указан!"
+            exit 1
+        fi
+        read -p "Введите порт прокси-сервера: " PROXY_PORT
+        if ! validate_port "$PROXY_PORT"; then
+            echo "❌ Ошибка: Некорректный порт (должен быть от 1 до 65535)!"
+            exit 1
+        fi
+        read -p "Введите логин: " PROXY_USER
+        read -s -p "Введите пароль (ввод скрыт): " PROXY_PASS
+        echo ""
+        if [ -z "$PROXY_USER" ] || [ -z "$PROXY_PASS" ]; then
+            echo "❌ Ошибка: Логин и пароль обязательны для этого режима!"
+            exit 1
+        fi
+        if [[ "$PROXY_USER" == *@* || "$PROXY_PASS" == *@* || "$PROXY_USER" == *:* || "$PROXY_PASS" == *:* ]]; then
+            echo "⚠️ Внимание: логин/пароль содержат спецсимволы (@ или :)."
+            echo "   Это может привести к ошибке разбора адреса прокси."
+        fi
+        PROXY_ADDR="${PROXY_USER}:${PROXY_PASS}@${PROXY_HOST}:${PROXY_PORT}"
+        echo "✅ Выбран внешний прокси с авторизацией: socks5://${PROXY_USER}:***@${PROXY_HOST}:${PROXY_PORT}"
+        ;;
+    3)
+        read -p "Введите адрес (IP или домен) прокси-сервера: " PROXY_HOST
+        if [ -z "$PROXY_HOST" ]; then
+            echo "❌ Ошибка: Адрес прокси не указан!"
+            exit 1
+        fi
+        read -p "Введите порт прокси-сервера: " PROXY_PORT
+        if ! validate_port "$PROXY_PORT"; then
+            echo "❌ Ошибка: Некорректный порт (должен быть от 1 до 65535)!"
+            exit 1
+        fi
+        PROXY_ADDR="${PROXY_HOST}:${PROXY_PORT}"
+        echo "✅ Выбран внешний прокси без авторизации: socks5://${PROXY_ADDR}"
+        ;;
+    *)
+        echo "❌ Ошибка: Неверный выбор!"
+        exit 1
+        ;;
+esac
+
+echo ""
+echo "========================================="
+echo " ШАГ 4: Установка утилиты tun2socks"
 echo "========================================="
 apt-get update -y && apt-get install -y unzip
 
@@ -203,7 +280,7 @@ echo "tun2socks успешно установлен."
 
 echo ""
 echo "========================================="
-echo " ШАГ 4: Генерация скрипта маршрутизации"
+echo " ШАГ 5: Генерация скрипта маршрутизации"
 echo "========================================="
 cat << EOF > /usr/local/bin/tg-routing.sh
 #!/bin/bash
@@ -211,7 +288,7 @@ cat << EOF > /usr/local/bin/tg-routing.sh
 TUN_DEV="tun0"
 TUN_IP="10.0.0.1/30"
 TUN_MTU="1400"
-PROXY_ADDR="127.0.0.1:10808"
+PROXY_ADDR="$PROXY_ADDR"
 
 SUBNETS=(
 $(echo -e "$SUBNETS_FORMATTED")
@@ -246,7 +323,7 @@ echo "Скрипт /usr/local/bin/tg-routing.sh успешно создан."
 
 echo ""
 echo "========================================="
-echo " ШАГ 5: Создание службы Systemd"
+echo " ШАГ 6: Создание службы Systemd"
 echo "========================================="
 cat << 'EOF' > /etc/systemd/system/tg-tunnel.service
 [Unit]
@@ -268,7 +345,7 @@ echo "Служба tg-tunnel.service создана."
 
 echo ""
 echo "========================================="
-echo " ШАГ 6: Активация и запуск службы"
+echo " ШАГ 7: Активация и запуск службы"
 echo "========================================="
 systemctl stop tg-tunnel 2>/dev/null || true
 systemctl daemon-reload
@@ -278,7 +355,7 @@ echo "Служба запущена."
 
 echo ""
 echo "========================================="
-echo " ШАГ 7: Проверка статуса"
+echo " ШАГ 8: Проверка статуса"
 echo "========================================="
 set +e
 sleep 2
