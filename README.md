@@ -48,3 +48,62 @@ curl --resolve raw.githubusercontent.com:443:185.199.108.133 -o /tmp/gh_fix.sh h
 ```bash
 curl -o /tmp/insta_healer.sh https://raw.githubusercontent.com/MarkinAlexander/custom-scripts/main/insta_healer.sh && bash /tmp/insta_healer.sh
 ```
+
+---
+
+## 🚇 tg-tun2socks-manager.sh (Туннелирование Telegram через SOCKS5)
+
+Скрипт создаёт независимый TUN-туннель, который направляет трафик Telegram (и любых других указанных подсетей) через локальный SOCKS5-прокси с помощью утилиты [tun2socks](https://github.com/xjasonlyu/tun2socks). Это позволяет «вытащить» трафик Telegram из основного туннеля/прокси и пустить его отдельным маршрутом.
+
+В процессе работы скрипт:
+- Предлагает добавить базовые подсети Telegram;
+- Позволяет указать собственные подсети (CIDR) для маршрутизации;
+- Скачивает и устанавливает бинарник `tun2socks`;
+- Генерирует скрипт маршрутизации `/usr/local/bin/tg-routing.sh`;
+- Создаёт и запускает службу systemd `tg-tunnel.service`.
+
+> ⚠️ Скрипт предназначен для **Debian/Ubuntu**-подобных систем (использует `apt-get` и `systemd`) и требует запуска от имени **root** (`sudo`). По умолчанию ожидается SOCKS5-прокси на `127.0.0.1:10808`.
+
+### Быстрый запуск через /tmp (директория в оперативной памяти):
+
+```bash
+curl -o /tmp/tg-tun2socks-manager.sh https://raw.githubusercontent.com/MarkinAlexander/custom-scripts/main/tg-tun2socks-manager.sh && sudo bash /tmp/tg-tun2socks-manager.sh
+```
+
+### Просто скачать в текущую директорию без запуска
+
+```bash
+curl -o tg-tun2socks-manager.sh https://raw.githubusercontent.com/MarkinAlexander/custom-scripts/main/tg-tun2socks-manager.sh
+```
+
+### Флаги для управления:
+
+| Флаг | Описание |
+|------|----------|
+| *(без флагов)* | Обычная интерактивная установка с выбором подсетей и скачиванием `tun2socks` с GitHub. |
+| `-f`, `--file /path/to.zip` | Установка с использованием локального архива `tun2socks.zip` (полезно при блокировке GitHub). |
+| `-u`, `--uninstall` | Полная остановка и удаление службы, маршрутов, бинарника и всех созданных файлов. |
+
+Примеры:
+
+```bash
+# Обычная установка
+sudo bash tg-tun2socks-manager.sh
+
+# Установка из локального архива
+sudo bash tg-tun2socks-manager.sh -f /path/to/tun2socks.zip
+
+# Полное удаление
+sudo bash tg-tun2socks-manager.sh -u
+```
+
+### Ручное скачивание tun2socks.zip
+
+Если GitHub заблокирован и автоматическое скачивание не срабатывает, архив можно скачать вручную и передать скрипту через флаг `-f`. Актуальные релизы доступны в репозитории проекта:
+
+🔗 **[xjasonlyu/tun2socks — Releases](https://github.com/xjasonlyu/tun2socks/releases)**
+
+Прямая ссылка на используемую версию (Linux amd64):
+```
+https://github.com/xjasonlyu/tun2socks/releases/download/v2.7.0/tun2socks-linux-amd64.zip
+```

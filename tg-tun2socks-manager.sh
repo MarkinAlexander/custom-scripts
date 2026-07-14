@@ -192,7 +192,7 @@ if [ -n "$LOCAL_ZIP" ]; then
     cp -f "$LOCAL_ZIP" ./tun2socks.zip
 else
     echo "Скачивание актуального архива с GitHub..."
-    curl -L -o tun2socks.zip https://github.com/xjasonlyu/tun2socks/releases/download/v2.6.0/tun2socks-linux-amd64.zip
+    curl -L -o tun2socks.zip https://github.com/xjasonlyu/tun2socks/releases/download/v2.7.0/tun2socks-linux-amd64.zip
 fi
 
 unzip -o tun2socks.zip
