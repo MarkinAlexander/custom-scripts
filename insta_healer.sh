@@ -62,15 +62,55 @@ echo ""
 mapfile -t GOOD_ENTRIES < <(cat "$tmp_good" 2>/dev/null)
 rm -f "$tmp_good"
 
-if [ ${#GOOD_ENTRIES[@]} -eq 0 ]; then
-  echo -e "${red}Ни один из IP-адресов Instagram не доступен. Проверьте интернет-соединение или блокировки провайдера.${plain}"
-  exit 1
+FAILED_ENTRIES=()
+for entry in "${INSTAGRAM_MAP[@]}"; do
+  found=0
+  for good in "${GOOD_ENTRIES[@]}"; do
+    if [ "$entry" = "$good" ]; then
+      found=1
+      break
+    fi
+  done
+  [ "$found" -eq 0 ] && FAILED_ENTRIES+=("$entry")
+done
+
+KEY_COVERED=1
+for domain in instagram.com www.instagram.com; do
+  covered=0
+  for entry in "${GOOD_ENTRIES[@]}"; do
+    read -ra PARTS <<< "$entry"
+    for ((i=1; i<${#PARTS[@]}; i++)); do
+      if [ "${PARTS[$i]}" = "$domain" ]; then
+        covered=1
+        break 2
+      fi
+    done
+  done
+  [ "$covered" -eq 0 ] && KEY_COVERED=0
+done
+
+if [ ${#GOOD_ENTRIES[@]} -gt 0 ]; then
+  echo -e "${green}Успешно прошли проверку ${#GOOD_ENTRIES[@]} записей:${plain}"
+  for entry in "${GOOD_ENTRIES[@]}"; do
+    echo -e "  ${green}+${plain} $entry"
+  done
 fi
 
-echo -e "${green}Успешно прошли проверку ${#GOOD_ENTRIES[@]} записей:${plain}"
-for entry in "${GOOD_ENTRIES[@]}"; do
-  echo -e "  ${green}+${plain} $entry"
-done
+if [ "$KEY_COVERED" -eq 0 ]; then
+  echo ""
+  echo -e "${yellow}Внимание! Основные домены instagram.com и www.instagram.com не прошли проверку curl:${plain}"
+  for entry in "${FAILED_ENTRIES[@]}"; do
+    echo -e "  ${red}-${plain} $entry"
+  done
+  echo -e "${yellow}Эти записи всё равно могут быть рабочими: curl может дать ложный результат проверки, или у вас не подобрана стратегия обхода DPI.${plain}"
+  read -p "Внести все адреса без проверки? (y/n): " add_all
+  if [[ "$add_all" == "y" || "$add_all" == "Y" ]]; then
+    GOOD_ENTRIES=("${INSTAGRAM_MAP[@]}")
+  elif [ ${#GOOD_ENTRIES[@]} -eq 0 ]; then
+    echo -e "${red}Ни один из IP-адресов Instagram не доступен. Проверьте интернет-соединение или блокировки провайдера.${plain}"
+    exit 1
+  fi
+fi
 
 echo ""
 read -p "Применить эти настройки? (y/n): " confirm
