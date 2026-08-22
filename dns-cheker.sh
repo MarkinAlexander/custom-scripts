@@ -43,6 +43,9 @@ SERVERS=(
   "https://doh.mullvad.net/dns-query|mullvad"
   "https://common.dot.dns.yandex.net/dns-query|yandex"
   "https://dns.comss.one/dns-query|comss"
+  "https://freedns.controld.com/p0|controld"
+  "https://doh.opendns.com/dns-query|opendns"
+  "https://xbox-dns.ru/dns-query|xbox-dns"
 )
 
 # IP, которыми провайдеры подменяют ответы на заблокированные домены
