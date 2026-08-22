@@ -20,12 +20,21 @@ fi
 DEFAULT_DOMAIN="ya.ru"
 DEFAULT_MULTI="instagram.com,facebook.com,x.com,linkedin.com,rutracker.org"
 
-TIMEOUT=3
+TIMEOUT=5
 DOMAIN="$DEFAULT_DOMAIN"
 SERVER_URL=""
 MULTI=0
 MULTI_LIST="$DEFAULT_MULTI"
 JSON=0
+
+# Параллельность: одновременные TLS-рукопожатия забивают CPU слабого роутера,
+# из-за чего латентности завышаются в разы, а медленные серверы ловят ложные
+# таймауты. Поэтому опрашиваем партиями, по умолчанию — по числу ядер (1..4).
+CPU_N=$(grep -c '^processor' /proc/cpuinfo 2>/dev/null)
+case $CPU_N in ''|*[!0-9]*) CPU_N=1 ;; esac
+[ "$CPU_N" -lt 1 ] && CPU_N=1
+[ "$CPU_N" -gt 4 ] && CPU_N=4
+PARALLEL=$CPU_N
 
 # URL|короткое имя (короткие имена нужны для узкой таблицы режима -m)
 SERVERS=(
@@ -52,6 +61,9 @@ usage() {
 Опции:
   -d, --domain ДОМЕН    тестовый домен (по умолчанию $DEFAULT_DOMAIN)
   -t, --timeout СЕК     таймаут запроса curl (по умолчанию $TIMEOUT)
+  -p, --parallel N      сколько серверов опрашивать одновременно
+                         (по умолчанию — число ядер CPU, максимум 4;
+                         1 — последовательный опрос, самые честные латентности)
   -s, --server URL      проверить только указанный DoH-сервер
                          (полный URL, например https://dns.google/dns-query)
   -m, --multi [СПИСОК]  режим детекта подмены: контрольный домен + список
@@ -65,6 +77,7 @@ usage() {
   $(basename "$0") google.com               # домен позиционным аргументом
   $(basename "$0") -t 5 -d instagram.com
   $(basename "$0") -s https://dns.google/dns-query
+  $(basename "$0") -p 1                     # последовательный опрос, честные латентности
   $(basename "$0") -m                       # детект подмены, список по умолчанию
   $(basename "$0") -m instagram.com,facebook.com -j
 EOF
@@ -79,6 +92,9 @@ while [ "$#" -gt 0 ]; do
     -t|--timeout)
       [ -n "${2:-}" ] || { echo "${red}Не указан таймаут для $1${plain}"; exit 1; }
       TIMEOUT=$2; shift 2 ;;
+    -p|--parallel)
+      [ -n "${2:-}" ] || { echo "${red}Не указано число для $1${plain}"; exit 1; }
+      PARALLEL=$2; shift 2 ;;
     -s|--server)
       [ -n "${2:-}" ] || { echo "${red}Не указан URL для $1${plain}"; exit 1; }
       SERVER_URL=$2; shift 2 ;;
@@ -101,6 +117,10 @@ case $TIMEOUT in
   ''|*[!0-9]*) echo "${red}Таймаут должен быть целым числом секунд: $TIMEOUT${plain}"; exit 1 ;;
 esac
 [ "$TIMEOUT" -gt 0 ] || { echo "${red}Таймаут должен быть больше нуля${plain}"; exit 1; }
+case $PARALLEL in
+  ''|*[!0-9]*) echo "${red}Число параллельных запросов должно быть целым: $PARALLEL${plain}"; exit 1 ;;
+esac
+[ "$PARALLEL" -gt 0 ] || { echo "${red}Число параллельных запросов должно быть больше нуля${plain}"; exit 1; }
 
 # ---------- Проверка зависимостей ----------
 command -v curl >/dev/null 2>&1 || {
@@ -456,11 +476,16 @@ mkdir -p "$TMP" || { echo "${red}Не удалось создать $TMP${plain}
 trap 'rm -rf "$TMP"' EXIT
 trap 'rm -rf "$TMP"; exit 130' INT TERM
 
-# ---------- Параллельный опрос ----------
+# ---------- Параллельный опрос партиями ----------
+# Партия запущена целиком, дожидаемся её завершения и стартуем следующую:
+# без барьера слабый одноядерный CPU захлёбывается одновременными TLS-рукопожатиями
 i=0
 for u in "${SRV_URLS[@]}"; do
   i=$((i + 1))
   ( server_job "$u" "$i" "${MDOMS[@]}" ) > "$TMP/srv_$i" 2>/dev/null &
+  if [ $((i % PARALLEL)) -eq 0 ]; then
+    wait
+  fi
 done
 wait
 
