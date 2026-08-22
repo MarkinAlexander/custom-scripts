@@ -120,3 +120,46 @@ sudo bash tg-tun2socks-manager.sh -u
 ```
 https://github.com/xjasonlyu/tun2socks/releases/download/v2.7.0/tun2socks-linux-amd64.zip
 ```
+
+---
+
+## 🔍 dns-cheker.sh (Проверка DoH-серверов)
+
+Скрипт параллельно проверяет публичные DoH (DNS-over-HTTPS) серверы: Google, Cloudflare, Quad9, AdGuard, NextDNS, Mullvad, Яндекс и Comss. Замеряет задержку, показывает статус ответа и полученные IP, определяет подмену DNS провайдером (ответы stub-IP вроде `0.0.0.0` или адресов Ростелекома) и фильтрацию резолвером (пустые ответы).
+
+Запросы идут по стандарту RFC 8484 (wireformat), который поддерживают все DoH-серверы без исключения, поэтому работает весь список целиком. Серверы опрашиваются одновременно — полный прогон занимает секунды. Требуется только bash + curl.
+
+### Быстрый запуск (в обход блокировки DNS):
+```bash
+curl --resolve raw.githubusercontent.com:443:185.199.108.133 -o /tmp/dns-cheker.sh https://raw.githubusercontent.com/MarkinAlexander/custom-scripts/main/dns-cheker.sh && bash /tmp/dns-cheker.sh
+```
+
+### Флаги для управления:
+
+| Флаг | Описание |
+|------|----------|
+| *(без флагов)* | Параллельная проверка всех серверов, тестовый домен `ya.ru`. |
+| `-d`, `--domain ДОМЕН` | Проверка с другим доменом (домен можно передать и позиционным аргументом). |
+| `-t`, `--timeout СЕК` | Таймаут запроса (по умолчанию 3 сек). |
+| `-s`, `--server URL` | Проверка только одного сервера, например `https://dns.google/dns-query`. |
+| `-m`, `--multi [СПИСОК]` | Режим детекта подмены: контрольный домен + список блокируемых через запятую (по умолчанию `instagram.com,facebook.com,x.com,linkedin.com,rutracker.org`). |
+| `-j`, `--json` | Машинно-читаемый вывод: JSON-строка на каждый результат. |
+| `-h`, `--help` | Справка. |
+
+Примеры:
+
+```bash
+# проверка всех серверов
+bash dns-cheker.sh
+
+# другой домен и таймаут
+bash dns-cheker.sh -t 5 -d instagram.com
+
+# детект подмены DNS по блокируемым доменам
+bash dns-cheker.sh -m
+
+# свой список доменов + JSON-вывод
+bash dns-cheker.sh -m instagram.com,facebook.com -j
+```
+
+> 💡 Статусы: `OK` — реальные IP; `BLOCKED` — подмена (stub-IP); `EMPTY` — пустой ответ (фильтрация); `NXDOMAIN`/`SERVFAIL`/`REFUSED` — сервер не отдаёт домен; `TIMEOUT`/`DNSFAIL`/`CONNFAIL`/`TLSERR` — сетевые проблемы.
