@@ -27,14 +27,10 @@ MULTI=0
 MULTI_LIST="$DEFAULT_MULTI"
 JSON=0
 
-# Параллельность: одновременные TLS-рукопожатия забивают CPU слабого роутера,
-# из-за чего латентности завышаются в разы, а медленные серверы ловят ложные
-# таймауты. Поэтому опрашиваем партиями, по умолчанию — по числу ядер (1..4).
-CPU_N=$(grep -c '^processor' /proc/cpuinfo 2>/dev/null)
-case $CPU_N in ''|*[!0-9]*) CPU_N=1 ;; esac
-[ "$CPU_N" -lt 1 ] && CPU_N=1
-[ "$CPU_N" -gt 4 ] && CPU_N=4
-PARALLEL=$CPU_N
+# По умолчанию опрос последовательный: пользователь видит ход проверки
+# построчно, а латентности не искажаются соперничеством curl-ов за CPU
+# роутера. Ускорить можно флагом -p N.
+PARALLEL=1
 
 # URL|короткое имя (короткие имена нужны для узкой таблицы режима -m)
 SERVERS=(
@@ -62,8 +58,9 @@ usage() {
   -d, --domain ДОМЕН    тестовый домен (по умолчанию $DEFAULT_DOMAIN)
   -t, --timeout СЕК     таймаут запроса curl (по умолчанию $TIMEOUT)
   -p, --parallel N      сколько серверов опрашивать одновременно
-                         (по умолчанию — число ядер CPU, максимум 4;
-                         1 — последовательный опрос, самые честные латентности)
+                         (по умолчанию 1 — последовательный опрос с прогрессом
+                         и честными латентностями; при N>1 на слабых роутерах
+                         латентности искажаются)
   -s, --server URL      проверить только указанный DoH-сервер
                          (полный URL, например https://dns.google/dns-query)
   -m, --multi [СПИСОК]  режим детекта подмены: контрольный домен + список
@@ -174,19 +171,20 @@ validate_domain() {
 # ---------- Сборка DNS-запроса (RFC 8484): домен -> base64url ----------
 domain_to_b64url() {
   local domain=$1 label j
-  # заголовок: ID, флаги RD=1, QDCOUNT=1; дальше QNAME, QTYPE=A, QCLASS=IN
-  local q='\022\064\001\000\000\001\000\000\000\000\000\000'
+  # один printf на весь пакет: формат переиспользуется для каждого аргумента,
+  # spawn'ов процессов в разы меньше — на роутере это заметно
+  local -a codes=(18 52 1 0 0 1 0 0 0 0 0 0)   # заголовок: ID, RD=1, QDCOUNT=1
   local IFS='.'
   for label in $domain; do
     [ -n "$label" ] || continue
-    q+="$(printf '\\%03o' "${#label}")"
+    codes+=("${#label}")
     for ((j = 0; j < ${#label}; j++)); do
-      q+="$(printf '\\%03o' "'${label:j:1}")"
+      codes+=("'${label:j:1}")
     done
   done
-  # корень (\000) + QTYPE=A + QCLASS=IN
-  q+='\000\000\001\000\001'
-  local b64
+  codes+=(0 0 1 0 1)   # корень, QTYPE=A, QCLASS=IN
+  local q b64
+  q=$(printf '\\%03o' "${codes[@]}")
   b64=$(printf "$q" | base64 | tr -d '\n' | tr '+/' '-_')
   printf '%s' "${b64//=/}"
 }
@@ -196,6 +194,8 @@ domain_to_b64url() {
 parse_response() {
   local bytes arr n pos a len type rdlen
   P_RCODE=""; P_ANCOUNT=0; P_IPS=""
+  # при полной неудаче curl может вообще не создать файл с телом ответа
+  [ -f "$1" ] || return
   bytes=$($DUMPER < "$1")
   [ -z "$(echo $bytes)" ] && return
   arr=($bytes)
@@ -330,9 +330,19 @@ json_esc() {
 # ---------- Один сервер: строка результата на каждый домен ----------
 # формат строки: домен|curl_rc|http|time|rcode|ancount|ips
 server_job() {
-  local url=$1 idx=$2 dom wout rc
+  local url=$1 idx=$2 name dom wout rc n=0 total
+  name="${SRV_SHORTS[idx - 1]}"
   shift 2
+  total=$#
   for dom in "$@"; do
+    n=$((n + 1))
+    if [ "$PROGRESS" = 1 ]; then
+      if [ "$total" -gt 1 ]; then
+        printf '%-70s\r' "→ $name: $dom ($n/$total)..." >&2
+      else
+        printf '%-70s\r' "→ $name ($n/$SRV_N)..." >&2
+      fi
+    fi
     wout=$(curl -s -m "$TIMEOUT" -H "accept: application/dns-message" \
       -o "$TMP/body_$idx" -w "%{http_code} %{time_starttransfer}" \
       "$url?dns=$(domain_to_b64url "$dom")" 2>/dev/null)
@@ -344,94 +354,96 @@ server_job() {
 }
 
 # ---------- Рендер ----------
-render_single() {
-  local i f host dom rc http t rcode an ips lat_cell st_cell
-  local ok_n=0 blk_n=0 emp_n=0 err_n=0
+print_single_header() {
   printf "${bold}%-30s | %-7s | %-10s | %s${plain}\n" "SERVER" "LATENCY" "STATUS" "RESOLVED IPS"
   printf '%s\n' "--------------------------------------------------------------------------------------------------------"
-  for ((i = 0; i < SRV_N; i++)); do
-    f="$TMP/srv_$((i + 1))"
-    [ -f "$f" ] || continue
-    host="${SRV_HOSTS[i]}"
-    while IFS='|' read -r dom rc http t rcode an ips; do
-      [ -n "$dom" ] || continue
-      classify "$rc" "$http" "$rcode" "$ips"
-      case "$S_CAT" in
-        ok)      ok_n=$((ok_n + 1)) ;;
-        blocked) blk_n=$((blk_n + 1)) ;;
-        empty)   emp_n=$((emp_n + 1)) ;;
-        *)       err_n=$((err_n + 1)) ;;
-      esac
-      # при сетевой ошибке время от curl недостоверно
-      if [ "$rc" != "0" ]; then t=""; fi
-      lat_cell=$(fmt_latency_cell "$t")
-      st_cell=$(printf '%s%-10s%s' "$S_CLR" "$S_STATUS" "$plain")
-      printf '%-30s | %s | %s | %s\n' "$host" "$lat_cell" "$st_cell" "$S_IPS"
-    done < "$f"
-  done
-  echo ""
-  printf 'Итог: %s%d OK%s | %s%d BLOCKED%s | %s%d EMPTY%s | %s%d ERR%s\n' \
-    "$green" "$ok_n" "$plain" "$red" "$blk_n" "$plain" \
-    "$yellow" "$emp_n" "$plain" "$yellow" "$err_n" "$plain"
 }
 
-render_multi() {
-  local i f d dom rc http t rcode an ips short row lineno bad
-  local problems=0 total=0
-  local hdr
+render_single_srv() {  # $1 — номер сервера (с единицы)
+  local f="$TMP/srv_$1" host dom rc http t rcode an ips
+  [ -f "$f" ] || return
+  clear_progress
+  host="${SRV_HOSTS[$1 - 1]}"
+  while IFS='|' read -r dom rc http t rcode an ips; do
+    [ -n "$dom" ] || continue
+    classify "$rc" "$http" "$rcode" "$ips"
+    case "$S_CAT" in
+      ok)      OK_N=$((OK_N + 1)) ;;
+      blocked) BLK_N=$((BLK_N + 1)) ;;
+      empty)   EMP_N=$((EMP_N + 1)) ;;
+      *)       ERR_N=$((ERR_N + 1)) ;;
+    esac
+    # при сетевой ошибке время от curl недостоверно
+    if [ "$rc" != "0" ]; then t=""; fi
+    printf '%-30s | %s | %s | %s\n' "$host" "$(fmt_latency_cell "$t")" \
+      "$(printf '%s%-10s%s' "$S_CLR" "$S_STATUS" "$plain")" "$S_IPS"
+  done < "$f"
+}
+
+print_single_summary() {
+  echo ""
+  printf 'Итог: %s%d OK%s | %s%d BLOCKED%s | %s%d EMPTY%s | %s%d ERR%s\n' \
+    "$green" "$OK_N" "$plain" "$red" "$BLK_N" "$plain" \
+    "$yellow" "$EMP_N" "$plain" "$yellow" "$ERR_N" "$plain"
+}
+
+print_multi_header() {
+  local hdr d
   printf -v hdr '%-10s | %-7s' "SERVER" "LATENCY"
   for d in "${MDOMS[@]}"; do
     printf -v hdr '%s %-9s' "$hdr" "${d%%.*}"
   done
   printf "${bold}%s${plain}\n" "$hdr"
   printf '%s\n' "------------------------------------------------------------------------------------------"
-  for ((i = 0; i < SRV_N; i++)); do
-    f="$TMP/srv_$((i + 1))"
-    [ -f "$f" ] || continue
-    short="${SRV_SHORTS[i]}"
-    total=$((total + 1))
-    bad=0; lineno=0
-    printf -v row '%-10s | %-7s' "$short" "-"
-    while IFS='|' read -r dom rc http t rcode an ips; do
-      [ -n "$dom" ] || continue
-      classify "$rc" "$http" "$rcode" "$ips"
-      [ "$S_CAT" != "ok" ] && bad=1
-      if [ "$lineno" = "0" ] && [ "$rc" = "0" ]; then
-        # латентность по контрольному домену (первая строка)
-        row="$(printf '%-10s | %s' "$short" "$(fmt_latency_cell "$t")")"
-      fi
-      compact
-      row+=" $(printf '%s%-8s%s' "$C_CLR" "$C_TXT" "$plain")"
-      lineno=$((lineno + 1))
-    done < "$f"
-    [ "$bad" = "1" ] && problems=$((problems + 1))
-    printf '%s\n' "$row"
-  done
+}
+
+render_multi_srv() {  # $1 — номер сервера (с единицы)
+  local f="$TMP/srv_$1" dom rc http t rcode an ips short row lineno bad
+  [ -f "$f" ] || return
+  clear_progress
+  short="${SRV_SHORTS[$1 - 1]}"
+  MULTI_TOTAL=$((MULTI_TOTAL + 1))
+  bad=0; lineno=0
+  printf -v row '%-10s | %-7s' "$short" "-"
+  while IFS='|' read -r dom rc http t rcode an ips; do
+    [ -n "$dom" ] || continue
+    classify "$rc" "$http" "$rcode" "$ips"
+    [ "$S_CAT" != "ok" ] && bad=1
+    if [ "$lineno" = "0" ] && [ "$rc" = "0" ]; then
+      # латентность по контрольному домену (первая строка)
+      row="$(printf '%-10s | %s' "$short" "$(fmt_latency_cell "$t")")"
+    fi
+    compact
+    row+=" $(printf '%s%-8s%s' "$C_CLR" "$C_TXT" "$plain")"
+    lineno=$((lineno + 1))
+  done < "$f"
+  [ "$bad" = "1" ] && MULTI_PROBLEMS=$((MULTI_PROBLEMS + 1))
+  printf '%s\n' "$row"
+}
+
+print_multi_summary() {
   echo ""
   echo "OK — реальные IP · BLOCK — подмена (stub-IP) · EMPTY — пустой ответ (фильтрация) · NX — домен не резолвится"
   echo "SF/REF — SERVFAIL/REFUSED · T/O — таймаут · DNS/CONN/TLS/RST — сетевые ошибки"
-  printf 'Проблемы (подмена/фильтрация/ошибки) обнаружены на %d из %d серверов\n' "$problems" "$total"
+  printf 'Проблемы (подмена/фильтрация/ошибки) обнаружены на %d из %d серверов\n' "$MULTI_PROBLEMS" "$MULTI_TOTAL"
 }
 
-render_json() {
-  local i f dom rc http t rcode an ips ms ips_json ip
-  for ((i = 0; i < SRV_N; i++)); do
-    f="$TMP/srv_$((i + 1))"
-    [ -f "$f" ] || continue
-    while IFS='|' read -r dom rc http t rcode an ips; do
-      [ -n "$dom" ] || continue
-      classify "$rc" "$http" "$rcode" "$ips"
-      ms=$(time_to_ms "$t")
-      [ -z "$ms" ] && ms=null
-      [ -z "$rcode" ] && rcode=null
-      ips_json=""
-      for ip in $ips; do ips_json+="\"$ip\","; done
-      ips_json=${ips_json%,}
-      printf '{"server":"%s","domain":"%s","latency_ms":%s,"status":"%s","rcode":%s,"http_code":"%s","ips":[%s]}\n' \
-        "$(json_esc "${SRV_SHORTS[i]}")" "$(json_esc "$dom")" \
-        "$ms" "$S_STATUS" "$rcode" "$http" "$ips_json"
-    done < "$f"
-  done
+render_json_srv() {  # $1 — номер сервера (с единицы)
+  local f="$TMP/srv_$1" dom rc http t rcode an ips ms ips_json ip
+  [ -f "$f" ] || return
+  while IFS='|' read -r dom rc http t rcode an ips; do
+    [ -n "$dom" ] || continue
+    classify "$rc" "$http" "$rcode" "$ips"
+    ms=$(time_to_ms "$t")
+    [ -z "$ms" ] && ms=null
+    [ -z "$rcode" ] && rcode=null
+    ips_json=""
+    for ip in $ips; do ips_json+="\"$ip\","; done
+    ips_json=${ips_json%,}
+    printf '{"server":"%s","domain":"%s","latency_ms":%s,"status":"%s","rcode":%s,"http_code":"%s","ips":[%s]}\n' \
+      "$(json_esc "${SRV_SHORTS[$1 - 1]}")" "$(json_esc "$dom")" \
+      "$ms" "$S_STATUS" "$rcode" "$http" "$ips_json"
+  done < "$f"
 }
 
 # ---------- Подготовка ----------
@@ -476,28 +488,83 @@ mkdir -p "$TMP" || { echo "${red}Не удалось создать $TMP${plain}
 trap 'rm -rf "$TMP"' EXIT
 trap 'rm -rf "$TMP"; exit 130' INT TERM
 
-# ---------- Параллельный опрос партиями ----------
-# Партия запущена целиком, дожидаемся её завершения и стартуем следующую:
-# без барьера слабый одноядерный CPU захлёбывается одновременными TLS-рукопожатиями
-i=0
-for u in "${SRV_URLS[@]}"; do
-  i=$((i + 1))
-  ( server_job "$u" "$i" "${MDOMS[@]}" ) > "$TMP/srv_$i" 2>/dev/null &
-  if [ $((i % PARALLEL)) -eq 0 ]; then
-    wait
-  fi
-done
-wait
+# Прогресс показываем только при последовательном опросе в терминал:
+# при параллельном строки перемешаются, при пайпе — засорят вывод
+PROGRESS=0
+if [ -t 2 ] && [ "$JSON" = 0 ] && [ "$PARALLEL" = 1 ]; then
+  PROGRESS=1
+fi
 
-# ---------- Вывод ----------
-echo ""
-if [ "$JSON" = "1" ]; then
-  render_json
-else
-  if [ "$MULTI" = "1" ]; then
-    render_multi
+OK_N=0; BLK_N=0; EMP_N=0; ERR_N=0
+MULTI_TOTAL=0; MULTI_PROBLEMS=0
+
+# строка прогресса затирается строкой результата; перед печатью строки
+# подчистим хвост, если результат оказался короче прогресса
+clear_progress() {
+  [ "$PROGRESS" = 1 ] && printf '\r%*s\r' 72 '' >&2
+  return 0
+}
+
+# ---------- Приветствие ----------
+if [ "$JSON" = 0 ]; then
+  echo ""
+  if [ "$MULTI" = 1 ]; then
+    echo "DoH-чекер, режим детекта подмены: $SRV_N серверов × ${#MDOMS[@]} доменов ($((SRV_N * ${#MDOMS[@]})) запросов), таймаут ${TIMEOUT}с"
   else
-    render_single
+    echo "DoH-чекер: $SRV_N серверов, домен $DOMAIN, таймаут ${TIMEOUT}с"
+  fi
+  if [ "$PARALLEL" = 1 ]; then
+    echo "Опрос последовательный, результаты появляются построчно — дождитесь окончания"
+  else
+    echo "Опрос партиями по $PARALLEL сервера — дождитесь окончания"
+  fi
+  echo ""
+fi
+
+# ---------- Опрос и вывод ----------
+if [ "$PARALLEL" = 1 ]; then
+  # последовательный режим: результат каждого сервера печатается сразу
+  [ "$JSON" = 0 ] && [ "$MULTI" = 0 ] && print_single_header
+  [ "$JSON" = 0 ] && [ "$MULTI" = 1 ] && print_multi_header
+  i=0
+  for u in "${SRV_URLS[@]}"; do
+    i=$((i + 1))
+    server_job "$u" "$i" "${MDOMS[@]}" > "$TMP/srv_$i"
+    if [ "$JSON" = 1 ]; then
+      render_json_srv "$i"
+    elif [ "$MULTI" = 1 ]; then
+      render_multi_srv "$i"
+    else
+      render_single_srv "$i"
+    fi
+  done
+else
+  # партиями: собираем всё во временные файлы, печатаем разом по порядку
+  i=0
+  for u in "${SRV_URLS[@]}"; do
+    i=$((i + 1))
+    ( server_job "$u" "$i" "${MDOMS[@]}" ) > "$TMP/srv_$i" 2>/dev/null &
+    if [ $((i % PARALLEL)) -eq 0 ]; then
+      wait
+    fi
+  done
+  wait
+  if [ "$JSON" = 1 ]; then
+    for ((i = 1; i <= SRV_N; i++)); do render_json_srv "$i"; done
+  elif [ "$MULTI" = 1 ]; then
+    print_multi_header
+    for ((i = 1; i <= SRV_N; i++)); do render_multi_srv "$i"; done
+  else
+    print_single_header
+    for ((i = 1; i <= SRV_N; i++)); do render_single_srv "$i"; done
+  fi
+fi
+
+if [ "$JSON" = 0 ]; then
+  if [ "$MULTI" = 1 ]; then
+    print_multi_summary
+  else
+    print_single_summary
   fi
 fi
 echo ""
