@@ -374,7 +374,7 @@ json_esc() {
 # ---------- Один сервер: строка результата на каждый домен ----------
 # формат строки: домен|curl_rc|http|time|rcode|ancount|ips
 server_job() {
-  local url=$1 idx=$2 name dom wout rc n=0 total
+  local url=$1 idx=$2 name dom wout rc n=0 total b64 l1 l2 ch ct wt
   name="${SRV_SHORTS[idx - 1]}"
   shift 2
   total=$#
@@ -387,28 +387,36 @@ server_job() {
         printf '%-70s\r' "→ $name ($n/$SRV_N)..." >&2
       fi
     fi
+    # два запроса одним curl: первый устанавливает соединение (холодная
+    # латентность), второй идёт по готовому (тёплый отклик)
+    b64=$(domain_to_b64url "$dom")
     wout=$(curl -s -m "$TIMEOUT" -H "accept: application/dns-message" \
-      -o "$TMP/body_$idx" -w "%{http_code} %{time_starttransfer}" \
-      "$url?dns=$(domain_to_b64url "$dom")" 2>/dev/null)
+      -o /dev/null -o "$TMP/body_$idx" \
+      -w "%{http_code} %{time_starttransfer}\n" \
+      "$url?dns=$b64" "$url?dns=$b64" 2>/dev/null)
     rc=$?
+    # windows-сборки curl пишут \r\n — убираем \r перед разбором
+    wout=${wout//$'\r'/}
+    l1=${wout%%$'\n'*}; l2=${wout#*$'\n'}
+    ch=${l1%% *}; ct=${l1#* }; wt=${l2#* }
     parse_response "$TMP/body_$idx"
-    printf '%s|%s|%s|%s|%s|%s|%s\n' \
-      "$dom" "$rc" "${wout%% *}" "${wout#* }" "$P_RCODE" "$P_ANCOUNT" "${P_IPS% }"
+    printf '%s|%s|%s|%s|%s|%s|%s|%s\n' \
+      "$dom" "$rc" "$ch" "$ct" "$wt" "$P_RCODE" "$P_ANCOUNT" "${P_IPS% }"
   done
 }
 
 # ---------- Рендер ----------
 print_single_header() {
-  printf "${bold}%-30s | %-7s | %-10s | %s${plain}\n" "SERVER" "LATENCY" "STATUS" "RESOLVED IPS"
-  printf '%s\n' "--------------------------------------------------------------------------------------------------------"
+  printf "${bold}%-30s | %-7s | %-7s | %-10s | %s${plain}\n" "SERVER" "COLD" "WARM" "STATUS" "RESOLVED IPS"
+  printf '%s\n' "----------------------------------------------------------------------------------------------------------------"
 }
 
 render_single_srv() {  # $1 — номер сервера (с единицы)
-  local f="$TMP/srv_$1" host dom rc http t rcode an ips
+  local f="$TMP/srv_$1" host dom rc http cold warm rcode an ips
   [ -f "$f" ] || return
   clear_progress
   host="${SRV_HOSTS[$1 - 1]}"
-  while IFS='|' read -r dom rc http t rcode an ips; do
+  while IFS='|' read -r dom rc http cold warm rcode an ips; do
     [ -n "$dom" ] || continue
     classify "$rc" "$http" "$rcode" "$ips"
     case "$S_CAT" in
@@ -418,8 +426,9 @@ render_single_srv() {  # $1 — номер сервера (с единицы)
       *)       ERR_N=$((ERR_N + 1)) ;;
     esac
     # при сетевой ошибке время от curl недостоверно
-    if [ "$rc" != "0" ]; then t=""; fi
-    printf '%-30s | %s | %s | %s\n' "$host" "$(fmt_latency_cell "$t")" \
+    if [ "$rc" != "0" ]; then cold=""; warm=""; fi
+    printf '%-30s | %s | %s | %s | %s\n' "$host" \
+      "$(fmt_latency_cell "$cold")" "$(fmt_latency_cell "$warm")" \
       "$(printf '%s%-10s%s' "$S_CLR" "$S_STATUS" "$plain")" "$S_IPS"
   done < "$f"
 }
@@ -429,6 +438,7 @@ print_single_summary() {
   printf 'Итог: %s%d OK%s | %s%d BLOCKED%s | %s%d EMPTY%s | %s%d ERR%s\n' \
     "$green" "$OK_N" "$plain" "$red" "$BLK_N" "$plain" \
     "$yellow" "$EMP_N" "$plain" "$yellow" "$ERR_N" "$plain"
+  echo "COLD — с установкой соединения (DNS+TCP+TLS+запрос), WARM — отклик по готовому соединению"
 }
 
 print_multi_header() {
@@ -442,20 +452,20 @@ print_multi_header() {
 }
 
 render_multi_srv() {  # $1 — номер сервера (с единицы)
-  local f="$TMP/srv_$1" dom rc http t rcode an ips short row lineno bad
+  local f="$TMP/srv_$1" dom rc http cold warm rcode an ips short row lineno bad
   [ -f "$f" ] || return
   clear_progress
   short="${SRV_SHORTS[$1 - 1]}"
   MULTI_TOTAL=$((MULTI_TOTAL + 1))
   bad=0; lineno=0
   printf -v row '%-10s | %-7s' "$short" "-"
-  while IFS='|' read -r dom rc http t rcode an ips; do
+  while IFS='|' read -r dom rc http cold warm rcode an ips; do
     [ -n "$dom" ] || continue
     classify "$rc" "$http" "$rcode" "$ips"
     [ "$S_CAT" != "ok" ] && bad=1
     if [ "$lineno" = "0" ] && [ "$rc" = "0" ]; then
-      # латентность по контрольному домену (первая строка)
-      row="$(printf '%-10s | %s' "$short" "$(fmt_latency_cell "$t")")"
+      # латентность по контрольному домену (первая строка), тёплый отклик
+      row="$(printf '%-10s | %s' "$short" "$(fmt_latency_cell "$warm")")"
     fi
     compact
     row+=" $(printf '%s%-8s%s' "$C_CLR" "$C_TXT" "$plain")"
@@ -469,24 +479,25 @@ print_multi_summary() {
   echo ""
   echo "OK — реальные IP · BLOCK — подмена (stub-IP) · EMPTY — пустой ответ (фильтрация) · NX — домен не резолвится"
   echo "SF/REF — SERVFAIL/REFUSED · T/O — таймаут · DNS/CONN/TLS/RST — сетевые ошибки"
+  echo "LATENCY — тёплый отклик: повторный запрос по готовому соединению"
   printf 'Проблемы (подмена/фильтрация/ошибки) обнаружены на %d из %d серверов\n' "$MULTI_PROBLEMS" "$MULTI_TOTAL"
 }
 
 render_json_srv() {  # $1 — номер сервера (с единицы)
-  local f="$TMP/srv_$1" dom rc http t rcode an ips ms ips_json ip
+  local f="$TMP/srv_$1" dom rc http cold warm rcode an ips cold_ms warm_ms ips_json ip
   [ -f "$f" ] || return
-  while IFS='|' read -r dom rc http t rcode an ips; do
+  while IFS='|' read -r dom rc http cold warm rcode an ips; do
     [ -n "$dom" ] || continue
     classify "$rc" "$http" "$rcode" "$ips"
-    ms=$(time_to_ms "$t")
-    [ -z "$ms" ] && ms=null
+    cold_ms=$(time_to_ms "$cold"); [ -z "$cold_ms" ] && cold_ms=null
+    warm_ms=$(time_to_ms "$warm"); [ -z "$warm_ms" ] && warm_ms=null
     [ -z "$rcode" ] && rcode=null
     ips_json=""
     for ip in $ips; do ips_json+="\"$ip\","; done
     ips_json=${ips_json%,}
-    printf '{"server":"%s","domain":"%s","latency_ms":%s,"status":"%s","rcode":%s,"http_code":"%s","ips":[%s]}\n' \
+    printf '{"server":"%s","domain":"%s","latency_ms":%s,"warm_ms":%s,"status":"%s","rcode":%s,"http_code":"%s","ips":[%s]}\n' \
       "$(json_esc "${SRV_SHORTS[$1 - 1]}")" "$(json_esc "$dom")" \
-      "$ms" "$S_STATUS" "$rcode" "$http" "$ips_json"
+      "$cold_ms" "$warm_ms" "$S_STATUS" "$rcode" "$http" "$ips_json"
   done < "$f"
 }
 
@@ -562,6 +573,7 @@ if [ "$JSON" = 0 ]; then
     echo "DoH-чекер: $SRV_N серверов, домен $DOMAIN, таймаут ${TIMEOUT}с"
   fi
   if [ "$PARALLEL" = 1 ]; then
+    echo "Каждый сервер опрашивается дважды: холодный запрос (с установкой соединения) и тёплый отклик"
     echo "Опрос последовательный, результаты появляются построчно — дождитесь окончания"
   else
     echo "Опрос партиями по $PARALLEL сервера — дождитесь окончания"
