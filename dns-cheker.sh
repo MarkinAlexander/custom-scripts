@@ -22,6 +22,7 @@ DEFAULT_MULTI="instagram.com,facebook.com,x.com,linkedin.com,rutracker.org"
 
 TIMEOUT=5
 DOMAIN="$DEFAULT_DOMAIN"
+DOMAIN_SPECIFIED=0
 SERVER_URL=""
 MULTI=0
 MULTI_LIST="$DEFAULT_MULTI"
@@ -51,8 +52,9 @@ usage() {
   cat <<EOF
 Использование: $(basename "$0") [опции] [домен]
 
-Параллельная проверка DoH-серверов: задержка, статус ответа, полученные IP,
+Проверка DoH-серверов: задержка, статус ответа, полученные IP,
 детект подмены DNS провайдером (stub-IP) и фильтрации резолвером.
+Без указания домена в интерактивном режиме предлагается меню выбора.
 
 Опции:
   -d, --domain ДОМЕН    тестовый домен (по умолчанию $DEFAULT_DOMAIN)
@@ -85,7 +87,7 @@ while [ "$#" -gt 0 ]; do
   case $1 in
     -d|--domain)
       [ -n "${2:-}" ] || { echo "${red}Не указан домен для $1${plain}"; exit 1; }
-      DOMAIN=$2; shift 2 ;;
+      DOMAIN=$2; DOMAIN_SPECIFIED=1; shift 2 ;;
     -t|--timeout)
       [ -n "${2:-}" ] || { echo "${red}Не указан таймаут для $1${plain}"; exit 1; }
       TIMEOUT=$2; shift 2 ;;
@@ -106,7 +108,7 @@ while [ "$#" -gt 0 ]; do
     -j|--json) JSON=1; shift ;;
     -h|--help) usage; exit 0 ;;
     -*) echo "${red}Неизвестный параметр: $1${plain}"; echo; usage; exit 1 ;;
-    *) DOMAIN=$1; shift ;;
+    *) DOMAIN=$1; DOMAIN_SPECIFIED=1; shift ;;
   esac
 done
 
@@ -163,9 +165,48 @@ if [ -z "$DUMPER" ]; then
 fi
 
 # ---------- Валидация домена ----------
-validate_domain() {
-  echo "$1" | grep -qE '^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$' \
-    || { echo "${red}Некорректный домен: $1${plain}"; exit 1; }
+check_domain() {
+  echo "$1" | grep -qE '^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$'
+}
+
+# ---------- Интерактивный выбор домена ----------
+MENU_DOMAINS=(
+  "ya.ru|российский, по умолчанию"
+  "google.com|международный"
+  "github.com|периодически тормозит в РФ"
+  "instagram.com|заблокирован в РФ, проверка подмены"
+  "facebook.com|заблокирован в РФ, проверка подмены"
+  "x.com|заблокирован в РФ, проверка подмены"
+  "rutracker.org|заблокирован в РФ, проверка подмены"
+)
+
+choose_domain() {
+  local i=0 e choice d n
+  echo ""
+  echo "Какой домен использовать для проверки?"
+  for e in "${MENU_DOMAINS[@]}"; do
+    i=$((i + 1))
+    printf '  [%d] %-14s — %s\n' "$i" "${e%%|*}" "${e#*|}"
+  done
+  n=$((i + 1))
+  printf '  [%d] Свой домен\n' "$n"
+  while :; do
+    read -p "Выбор (Enter = ya.ru): " choice || { DOMAIN="$DEFAULT_DOMAIN"; return; }
+    [ -z "$choice" ] && choice=1
+    case $choice in
+      *[!0-9]*) echo "${yellow}Введите число от 1 до $n${plain}"; continue ;;
+    esac
+    [ "$choice" -ge 1 ] && [ "$choice" -le "$n" ] && break
+    echo "${yellow}Введите число от 1 до $n${plain}"
+  done
+  if [ "$choice" = "$n" ]; then
+    while :; do
+      read -p "Домен для проверки: " d || { DOMAIN="$DEFAULT_DOMAIN"; return; }
+      if check_domain "$d"; then DOMAIN=$d; return; fi
+      echo "${yellow}Некорректный домен: $d${plain}"
+    done
+  fi
+  DOMAIN="${MENU_DOMAINS[choice - 1]%%|*}"
 }
 
 # ---------- Сборка DNS-запроса (RFC 8484): домен -> base64url ----------
@@ -447,7 +488,11 @@ render_json_srv() {  # $1 — номер сервера (с единицы)
 }
 
 # ---------- Подготовка ----------
-validate_domain "$DOMAIN"
+# при интерактивном запуске без явного домена предлагаем меню выбора
+if [ "$JSON" = 0 ] && [ "$DOMAIN_SPECIFIED" = 0 ] && [ -t 0 ]; then
+  choose_domain
+fi
+check_domain "$DOMAIN" || { echo "${red}Некорректный домен: $DOMAIN${plain}"; exit 1; }
 
 MDOMS=("$DOMAIN")
 if [ "$MULTI" = "1" ]; then
@@ -458,7 +503,7 @@ if [ "$MULTI" = "1" ]; then
   done
   IFS=$old_ifs
   for d in "${MDOMS[@]:1}"; do
-    validate_domain "$d"
+    check_domain "$d" || { echo "${red}Некорректный домен: $d${plain}"; exit 1; }
   done
 fi
 
