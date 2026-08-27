@@ -39,17 +39,31 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
-echo -e "${green}Проверка доступности raw.githubusercontent.com через Google DoH...${plain}"
+echo -e "${green}Проверка доступности raw.githubusercontent.com через Google DoH (IPv4 и IPv6)...${plain}"
 
 doh_response=$(curl -fsSL --max-time 10 "https://dns.google/resolve?name=raw.githubusercontent.com&type=A" 2>/dev/null || true)
-all_ips=$(echo "$doh_response" | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | sort -u | tr '\n' ' ')
+all_ips_v4=$(echo "$doh_response" | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | sort -u | tr '\n' ' ')
 
-if [ -z "$all_ips" ]; then
-  echo -e "${red}Не удалось получить IP-адреса через DoH.${plain}"
-  exit 1
+doh_response6=$(curl -fsSL --max-time 10 "https://dns.google/resolve?name=raw.githubusercontent.com&type=AAAA" 2>/dev/null || true)
+all_ips_v6=$(echo "$doh_response6" | grep -oE '"data":"[0-9a-fA-F:.]+"' | cut -d'"' -f4 | grep ':' | sort -u | tr '\n' ' ')
+
+fallback_v4="185.199.108.133 185.199.109.133 185.199.110.133 185.199.111.133"
+fallback_v6="2606:50c0:8000::154 2606:50c0:8001::154 2606:50c0:8002::154 2606:50c0:8003::154"
+
+if [ -z "$all_ips_v4" ]; then
+  echo -e "${yellow}Google DoH не вернул IPv4-адреса, использую запасной список GitHub.${plain}"
+  all_ips_v4="$fallback_v4"
 fi
 
-echo "Обнаружены IP: $all_ips"
+if [ -z "$all_ips_v6" ]; then
+  echo -e "${yellow}Google DoH не вернул IPv6-адреса, использую запасной список GitHub.${plain}"
+  all_ips_v6="$fallback_v6"
+fi
+
+all_ips="$all_ips_v4 $all_ips_v6"
+
+echo "Обнаружены IPv4: $all_ips_v4"
+echo "Обнаружены IPv6: $all_ips_v6"
 echo "Проверяю доступность (это займет несколько секунд)..."
 tmp_good="/tmp/gh_good_ips_$$"
 rm -f "$tmp_good"
@@ -86,7 +100,11 @@ else
   declare -A ip_map
   i=1
   for ip in $good_ips; do
-    echo -e "  ${green}[$i]${plain} $ip"
+    case $ip in
+      *:*) family="IPv6" ;;
+      *) family="IPv4" ;;
+    esac
+    echo -e "  ${green}[$i]${plain} $ip ($family)"
     ip_map[$i]="$ip"
     ((i++))
   done
@@ -102,7 +120,11 @@ else
   done
 fi
 
-echo -e "${green}Выбранный IP: $selected_ip${plain}"
+selected_family="IPv4"
+case $selected_ip in
+  *:*) selected_family="IPv6" ;;
+esac
+echo -e "${green}Выбранный IP: $selected_ip ($selected_family)${plain}"
 
 # 4. Определение окружения и применение настроек
 if command -v ndmc >/dev/null 2>&1; then
@@ -124,7 +146,7 @@ temp_file="/tmp/hosts_temp_$$"
 
 pattern=$(IFS="|"; echo "${GITHUB_DOMAINS[*]//./\\.}")
 
-grep -vE "^[[:space:]]*([0-9]{1,3}\.){3}[0-9]{1,3}[[:space:]]+($pattern)" "$hosts_file" > "$temp_file" 2>/dev/null || true
+grep -vE "^[[:space:]]*(([0-9]{1,3}\.){3}[0-9]{1,3}|[0-9a-fA-F]{0,4}:[0-9a-fA-F:]+)[[:space:]]+($pattern)" "$hosts_file" > "$temp_file" 2>/dev/null || true
 
 for domain in "${GITHUB_DOMAINS[@]}"; do
   echo "$selected_ip $domain" >> "$temp_file"
