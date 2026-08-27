@@ -90,53 +90,99 @@ for ip in $good_ips; do
   ((ip_count++))
 done
 
-selected_ip=""
+while true; do
+  selected_ip=""
 
-if [ "$ip_count" -eq 1 ]; then
-  selected_ip="$good_ips"
-  echo -e "${green}Найден только 1 рабочий IP, используем его автоматически: $selected_ip${plain}"
-else
-  echo -e "${yellow}Найдено рабочих IP-адресов: $ip_count${plain}"
-  declare -A ip_map
-  i=1
-  for ip in $good_ips; do
-    case $ip in
-      *:*) family="IPv6" ;;
-      *) family="IPv4" ;;
-    esac
-    echo -e "  ${green}[$i]${plain} $ip ($family)"
-    ip_map[$i]="$ip"
-    ((i++))
-  done
+  if [ "$ip_count" -eq 1 ]; then
+    selected_ip="$good_ips"
+    echo -e "${green}Найден только 1 рабочий IP, используем его автоматически: $selected_ip${plain}"
+  else
+    echo -e "${yellow}Найдено рабочих IP-адресов: $ip_count${plain}"
+    declare -A ip_map
+    i=1
+    for ip in $good_ips; do
+      case $ip in
+        *:*) family="IPv6" ;;
+        *) family="IPv4" ;;
+      esac
+      echo -e "  ${green}[$i]${plain} $ip ($family)"
+      ip_map[$i]="$ip"
+      ((i++))
+    done
 
-  while true; do
-    read -p "Выберите номер IP для использования (или Ctrl+C для отмены): " choice
-    if [[ -n "${ip_map[$choice]}" ]]; then
-      selected_ip="${ip_map[$choice]}"
-      break
+    while true; do
+      read -p "Выберите номер IP для использования (или Ctrl+C для отмены): " choice
+      if [[ -n "${ip_map[$choice]}" ]]; then
+        selected_ip="${ip_map[$choice]}"
+        break
+      else
+        echo -e "${red}Неверный выбор. Попробуйте снова.${plain}"
+      fi
+    done
+  fi
+
+  selected_family="IPv4"
+  case $selected_ip in
+    *:*) selected_family="IPv6" ;;
+  esac
+  echo -e "${green}Выбранный IP: $selected_ip ($selected_family)${plain}"
+
+  if command -v ndmc >/dev/null 2>&1 && [ "$selected_family" = "IPv6" ]; then
+    echo -e "${yellow}Внимание: DNS Keenetic (ip host) принимает только IPv4-адреса, AAAA-записи он не поддерживает.${plain}"
+    echo -e "${yellow}Выбранный IPv6 пропишется только в /etc/hosts самого роутера, клиентам сети он не достанется.${plain}"
+    echo -e "${yellow}Существующие записи DNS Keenetic при этом не трогаю.${plain}"
+    if [ "$ip_count" -eq 1 ]; then
+      v6_prompt="Продолжить с IPv6 только для /etc/hosts роутера? (y — да, n — выход): "
     else
-      echo -e "${red}Неверный выбор. Попробуйте снова.${plain}"
+      v6_prompt="Продолжить с IPv6 только для /etc/hosts роутера? (y — да, n — вернуться к выбору адреса): "
     fi
-  done
-fi
+    while true; do
+      read -p "$v6_prompt" answer
+      case $answer in
+        y|Y) break 2 ;;
+        n|N)
+          if [ "$ip_count" -eq 1 ]; then
+            echo -e "${red}Других рабочих адресов нет. Для записей в DNS Keenetic нужен IPv4, попробуйте позже.${plain}"
+            exit 1
+          fi
+          continue 2
+          ;;
+        *)
+          echo -e "${red}Ответьте y или n.${plain}"
+          ;;
+      esac
+    done
+  fi
 
-selected_family="IPv4"
-case $selected_ip in
-  *:*) selected_family="IPv6" ;;
-esac
-echo -e "${green}Выбранный IP: $selected_ip ($selected_family)${plain}"
+  break
+done
 
 # 4. Определение окружения и применение настроек
 if command -v ndmc >/dev/null 2>&1; then
-  echo -e "${yellow}Обнаружен Keenetic (ndmc). Применяю настройки через CLI...${plain}"
+  if [ "$selected_family" = "IPv6" ]; then
+    echo -e "${yellow}Keenetic: ip host не поддерживает IPv6, записи в DNS роутера не добавляю.${plain}"
+  else
+    echo -e "${yellow}Обнаружен Keenetic (ndmc). Применяю настройки через CLI...${plain}"
 
-  for domain in "${GITHUB_DOMAINS[@]}"; do
-    ndmc -c "no ip host $domain" >/dev/null 2>&1
-    ndmc -c "ip host $domain $selected_ip" >/dev/null 2>&1
-  done
+    ndmc_fail=0
+    for domain in "${GITHUB_DOMAINS[@]}"; do
+      ndmc -c "no ip host $domain" >/dev/null 2>&1
+      ndmc_out=$(ndmc -c "ip host $domain $selected_ip" 2>&1)
+      case $ndmc_out in
+        *error*|*Error*)
+          echo -e "${red}Keenetic отклонил запись $domain: $ndmc_out${plain}"
+          ((ndmc_fail++))
+          ;;
+      esac
+    done
 
-  ndmc -c "system configuration save" >/dev/null 2>&1
-  echo -e "${green}Готово! Записи добавлены в DNS Keenetic и конфигурация сохранена.${plain}"
+    if [ "$ndmc_fail" -eq 0 ]; then
+      ndmc -c "system configuration save" >/dev/null 2>&1
+      echo -e "${green}Готово! Записи добавлены в DNS Keenetic и конфигурация сохранена.${plain}"
+    else
+      echo -e "${red}Keenetic отклонил $ndmc_fail записей из ${#GITHUB_DOMAINS[@]}, конфигурацию не сохраняю.${plain}"
+    fi
+  fi
 fi
 
 echo -e "${yellow}Добавляю записи в /etc/hosts...${plain}"
